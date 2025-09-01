@@ -406,4 +406,249 @@
   (begin
     (asserts! (is-contract-owner) ERR-UNAUTHORIZED)
     (asserts! (is-some (map-get? validators { validator-address: validator })) ERR-INVALID-VALIDATOR)
-    (asserts! (<= new-score u100) ERR-INVALID-PERFORMANCE
+    (asserts! (<= new-score u100) ERR-INVALID-PERFORMANCE-SCORE)
+    
+    (map-set validators
+      { validator-address: validator }
+      (merge
+        (unwrap! (map-get? validators { validator-address: validator }) ERR-INVALID-VALIDATOR)
+        { performance-score: new-score }
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (resolve-yield-event (yield-event-id uint) (resolution-status (string-ascii 16)))
+  (let
+    (
+      (yield-data (unwrap! (map-get? yield-events { yield-event-id: yield-event-id }) ERR-INVALID-YIELD-STATUS))
+    )
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (or (is-contract-owner) (is-eq tx-sender (get initiator yield-data))) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get status yield-data) "ACTIVE") ERR-INVALID-YIELD-STATUS)
+    
+    (map-set yield-events
+      { yield-event-id: yield-event-id }
+      (merge yield-data { status: resolution-status })
+    )
+    (ok true)
+  )
+)
+
+(define-public (update-boost-multiplier (validator principal) (new-multiplier uint))
+  (begin
+    (asserts! (is-contract-owner) ERR-UNAUTHORIZED)
+    (asserts! (is-some (map-get? validators { validator-address: validator })) ERR-INVALID-VALIDATOR)
+    (asserts! (<= new-multiplier u1000) ERR-INVALID-BOOST-MULTIPLIER)
+    (asserts! (>= new-multiplier u1) ERR-INVALID-BOOST-MULTIPLIER)
+    
+    (map-set validators
+      { validator-address: validator }
+      (merge
+        (unwrap! (map-get? validators { validator-address: validator }) ERR-INVALID-VALIDATOR)
+        { boost-multiplier: new-multiplier }
+      )
+    )
+    (ok true)
+  )
+)
+
+;; Read-only Functions
+(define-read-only (get-stake-position-info (position-id (string-ascii 64)))
+  (map-get? stake-positions { position-id: position-id })
+)
+
+(define-read-only (get-yield-event-info (yield-event-id uint))
+  (map-get? yield-events { yield-event-id: yield-event-id })
+)
+
+(define-read-only (get-validator-info (validator principal))
+  (map-get? validators { validator-address: validator })
+)
+
+(define-read-only (get-protocol-stats)
+  {
+    total-slashing-events: (var-get total-slashing-events),
+    active: (var-get protocol-active),
+    ai-version: (var-get ai-optimization-version)
+  }
+)
+
+(define-read-only (check-position-slashed (position-id (string-ascii 64)))
+  (match (map-get? stake-positions { position-id: position-id })
+    position-data (get is-slashed position-data)
+    false
+  )
+)
+
+(define-read-only (get-validator-performance (validator principal))
+  (match (map-get? validators { validator-address: validator })
+    validator-data (get performance-score validator-data)
+    u0
+  )
+)
+
+(define-read-only (is-validator-blacklisted (validator principal))
+  (match (map-get? validators { validator-address: validator })
+    validator-data 
+    (if (get is-blacklisted validator-data)
+      (match (get blacklist-end validator-data)
+        end-block (< block-height end-block)
+        true
+      )
+      false
+    )
+    false
+  )
+)
+
+(define-read-only (get-validator-boost-multiplier (validator principal))
+  (match (map-get? validators { validator-address: validator })
+    validator-data (get boost-multiplier validator-data)
+    u100
+  )
+)
+
+(define-read-only (get-risk-pattern (pattern-id (string-ascii 64)))
+  (map-get? risk-patterns { pattern-id: pattern-id })
+)
+
+(define-read-only (calculate-amplified-yield (base-yield uint) (validator principal))
+  (let
+    (
+      (multiplier (get-validator-boost-multiplier validator))
+      (performance (get-validator-performance validator))
+    )
+    (* base-yield (/ (* multiplier performance) u10000))
+  )
+)
+
+;; Yield and Staking Functions
+(define-public (claim-amplified-yield (position-id (string-ascii 64)) (base-yield uint))
+  (let
+    (
+      (position-data (unwrap! (map-get? stake-positions { position-id: position-id }) ERR-INVALID-STAKE-POSITION))
+      (validator-addr (get validator position-data))
+    )
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (is-eq tx-sender validator-addr) ERR-UNAUTHORIZED)
+    (asserts! (not (get is-slashed position-data)) ERR-ALREADY-SLASHED)
+    (asserts! (get yield-verified position-data) ERR-PROTECTION-AUDIT-REQUIRED)
+    
+    ;; Calculate and reward amplified yield
+    (let ((amplified-yield (calculate-amplified-yield base-yield validator-addr)))
+      (reward-yield-boost-tokens tx-sender)
+      (ok amplified-yield)
+    )
+  )
+)
+
+(define-public (stake-reef-tokens (amount uint) (pool-id (string-ascii 32)))
+  (begin
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (is-authorized-validator tx-sender) ERR-VALIDATOR-BLACKLISTED)
+    (asserts! (> amount u0) ERR-INSUFFICIENT-REEF-TOKENS)
+    
+    ;; Basic staking logic - would integrate with token contract
+    (reward-yield-boost-tokens tx-sender)
+    
+    (ok true)
+  )
+)
+
+(define-public (unstake-reef-tokens (amount uint) (pool-id (string-ascii 32)))
+  (begin
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (is-authorized-validator tx-sender) ERR-VALIDATOR-BLACKLISTED)
+    (asserts! (> amount u0) ERR-INSUFFICIENT-REEF-TOKENS)
+    
+    ;; Basic unstaking logic - would integrate with token contract
+    (ok true)
+  )
+)
+
+;; Risk Management Functions
+(define-public (report-risk-event (position-id (string-ascii 64)) (risk-score uint))
+  (begin
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (is-authorized-validator tx-sender) ERR-VALIDATOR-BLACKLISTED)
+    (asserts! (is-valid-stake-position position-id) ERR-INVALID-STAKE-POSITION)
+    (asserts! (>= risk-score SLASHING-RISK-THRESHOLD) ERR-RISK-THRESHOLD)
+    
+    ;; Reward reporting
+    (reward-yield-boost-tokens tx-sender)
+    
+    (ok true)
+  )
+)
+
+;; Emergency Functions
+(define-public (emergency-pause)
+  (begin
+    (asserts! (is-contract-owner) ERR-UNAUTHORIZED)
+    (var-set protocol-active false)
+    (ok true)
+  )
+)
+
+(define-public (emergency-resume)
+  (begin
+    (asserts! (is-contract-owner) ERR-UNAUTHORIZED)
+    (var-set protocol-active true)
+    (ok true)
+  )
+)
+
+;; Governance Functions
+(define-public (submit-reef-proposal (proposal-id uint) (proposal-type (string-ascii 32)))
+  (begin
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (is-authorized-validator tx-sender) ERR-VALIDATOR-BLACKLISTED)
+    
+    ;; Basic proposal submission logic
+    (ok true)
+  )
+)
+
+(define-public (cast-reef-vote (proposal-id uint) (vote bool) (weight uint))
+  (begin
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (is-authorized-validator tx-sender) ERR-VALIDATOR-BLACKLISTED)
+    
+    (map-set reef-governance-votes
+      { proposal-id: proposal-id, voter: tx-sender }
+      {
+        vote: vote,
+        timestamp: block-height,
+        weight: weight
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Audit Functions
+(define-public (submit-protection-audit (audit-id uint) (target-validator principal) (score uint) (proof-hash (buff 32)))
+  (begin
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (is-authorized-validator tx-sender) ERR-VALIDATOR-BLACKLISTED)
+    (asserts! (is-some (map-get? validators { validator-address: target-validator })) ERR-INVALID-VALIDATOR)
+    (asserts! (<= score u100) ERR-INVALID-PERFORMANCE-SCORE)
+    
+    (map-set protection-audits
+      { audit-id: audit-id }
+      {
+        target-validator: target-validator,
+        auditor: tx-sender,
+        score: score,
+        timestamp: block-height,
+        proof-hash: proof-hash,
+        passed: (>= score MIN-PERFORMANCE-SCORE)
+      }
+    )
+    
+    (ok true)
+  )
+)
